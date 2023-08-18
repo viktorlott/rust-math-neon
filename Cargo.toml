@@ -1,0 +1,19 @@
+[package]
+name = "rust-math-neon"
+version = "0.1.0"
+edition = "2021"
+
+
+[[bench]]
+name = "sin-bench"
+harness = false
+
+[dependencies]
+libc = "0.2"
+
+[dev-dependencies]
+criterion = { version = "0.3", features = ["html_reports"] }
+
+[build-dependencies]
+bindgen = "0.65.1"
+cc = "1.0"
