@@ -35,9 +35,11 @@ pub unsafe fn fft(inp: &[f32]) -> Vec<f32> {
     let n_t = n as f32;
     let n_half = n / 2;
 
-    if n_half % 4 == 0 {
+    if n_half % 8 == 0 {
+        println!("fast");
         vectorized_combine(two_pi, n_t, n_half, &odd_fft, &even_fft, &mut out);
     } else {
+        println!("slow");
         for k in 0..n_half {
             let k_t = k as f32;
             let theta = two_pi * k_t / n_t;
@@ -70,7 +72,7 @@ unsafe fn vectorized_combine(
     let n_f32_vec = vdupq_n_f32(n_t);
     let increment = vld1q_f32([0.0, 1.0, 2.0, 3.0].as_ptr());
 
-    for k in (0..n_half).step_by(4) {
+    for k in (0..n_half).step_by(8) {
         let k_base = vdupq_n_f32(k as f32);
         let k_values = vaddq_f32(k_base, increment);
         // pi * [k0..k3]
@@ -92,93 +94,109 @@ unsafe fn vectorized_combine(
         let re_v = vld1q_f32(vector[4..].as_ptr());
         let im_v = vnegq_f32(vld1q_f32(vector[..4].as_ptr()));
 
-        let re_x_odd = [
-            odd_fft[2 * k],
-            odd_fft[2 * (k + 1)],
-            odd_fft[2 * (k + 2)],
-            odd_fft[2 * (k + 3)],
-        ];
-        let im_x_odd = [
-            odd_fft[2 * k + 1],
-            odd_fft[2 * (k + 1) + 1],
-            odd_fft[2 * (k + 2) + 1],
-            odd_fft[2 * (k + 3) + 1],
-        ];
+        let re_odd_v = vld1q_dup_f32(
+            [
+                odd_fft[2 * k],
+                odd_fft[2 * (k + 1)],
+                odd_fft[2 * (k + 2)],
+                odd_fft[2 * (k + 3)],
+            ]
+            .as_ptr(),
+        );
+        let im_odd_v = vld1q_dup_f32(
+            [
+                odd_fft[2 * k + 1],
+                odd_fft[2 * (k + 1) + 1],
+                odd_fft[2 * (k + 2) + 1],
+                odd_fft[2 * (k + 3) + 1],
+            ]
+            .as_ptr(),
+        );
 
-        let re_x_even = [
-            even_fft[2 * k],
-            even_fft[2 * (k + 1)],
-            even_fft[2 * (k + 2)],
-            even_fft[2 * (k + 3)],
-        ];
-        let im_x_even = [
-            even_fft[2 * k + 1],
-            even_fft[2 * (k + 1) + 1],
-            even_fft[2 * (k + 2) + 1],
-            even_fft[2 * (k + 3) + 1],
-        ];
-
-        let re_odd_v = vld1q_dup_f32(re_x_odd.as_ptr());
-        let im_odd_v = vld1q_dup_f32(im_x_odd.as_ptr());
+        // --------------------------------------------------------------
 
         // re * re_odd
         let re_times_re_odd_v = vmulq_f32(re_v, re_odd_v);
         // im * im_odd
         let im_times_im_odd_v = vmulq_f32(im_v, im_odd_v);
 
-        // re * re_odd - im * im_odd
-        let re_re_odd_minus_im_im_odd = vsubq_f32(re_times_re_odd_v, im_times_im_odd_v);
-
-        // even_fft[2 * k] + re * re_odd - im * im_odd;
-        let result1 = norm(vaddq_f32(
-            vld1q_f32(re_x_even.as_ptr()),
-            re_re_odd_minus_im_im_odd,
-        ));
-
-        out[2 * k] = result1[0];
-        out[2 * (k + 1)] = result1[1];
-        out[2 * (k + 2)] = result1[2];
-        out[2 * (k + 3)] = result1[3];
-
         // re * im_odd
         let re_times_im_odd_v = vmulq_f32(re_v, im_odd_v);
         // im * re_odd
         let im_times_re_odd_v = vmulq_f32(im_v, re_odd_v);
 
+        // -------------------------------------------------------------
+
+        // re * re_odd - im * im_odd
+        let re_re_odd_minus_im_im_odd = vsubq_f32(re_times_re_odd_v, im_times_im_odd_v);
         // re * im_odd + im * re_odd;
         let re_im_odd_plus_im_re_odd = vaddq_f32(re_times_im_odd_v, im_times_re_odd_v);
 
-        let result2 = norm(vaddq_f32(
-            vld1q_f32(im_x_even.as_ptr()),
-            re_im_odd_plus_im_re_odd,
-        ));
+        // re * re_odd + im * im_odd
+        let re_re_odd_plus_im_im_odd = vaddq_f32(re_times_re_odd_v, im_times_im_odd_v);
+        // re * im_odd - im * re_odd;
+        let re_im_odd_minus_im_re_odd = vsubq_f32(re_times_im_odd_v, im_times_re_odd_v);
 
-        out[2 * k + 1] = result2[0];
-        out[2 * (k + 1) + 1] = result2[1];
-        out[2 * (k + 2) + 1] = result2[2];
-        out[2 * (k + 3) + 1] = result2[3];
+        let even_2_times_k = [
+            even_fft[2 * k],
+            even_fft[2 * (k + 1)],
+            even_fft[2 * (k + 2)],
+            even_fft[2 * (k + 3)],
+        ];
+        let even_2_times_k_plus_1 = [
+            even_fft[2 * k + 1],
+            even_fft[2 * (k + 1) + 1],
+            even_fft[2 * (k + 2) + 1],
+            even_fft[2 * (k + 3) + 1],
+        ];
 
-        // out[2 * (k + n_half)] = even_fft[2 * k] - re * re_odd + im * im_odd;
-        let result3 = norm(vsubq_f32(
-            vld1q_f32(re_x_even.as_ptr()),
+        // ------------------------------------------------------
+
+        // out[2 * k] = even_fft[2 * k] + re * re_odd - im * im_odd;
+        let out_2_times_k = norm(vaddq_f32(
+            vld1q_f32(even_2_times_k.as_ptr()),
             re_re_odd_minus_im_im_odd,
         ));
 
-        out[2 * (k + n_half)] = result3[0];
-        out[2 * (k + n_half + 1)] = result3[1];
-        out[2 * (k + n_half + 2)] = result3[1];
-        out[2 * (k + n_half + 3)] = result3[1];
+        out[2 * k] = out_2_times_k[0];
+        out[2 * (k + 1)] = out_2_times_k[1];
+        out[2 * (k + 2)] = out_2_times_k[2];
+        out[2 * (k + 3)] = out_2_times_k[3];
 
-        // out[2 * (k + n_half) + 1] = even_fft[2 * k + 1] - re * im_odd - im * re_odd;
-        let result4 = norm(vsubq_f32(
-            vld1q_f32(im_x_even.as_ptr()),
+        // out[2 * k + 1] = even_fft[2 * k + 1] + re * im_odd + im * re_odd;
+        let out_2_times_k_plus_1 = norm(vaddq_f32(
+            vld1q_f32(even_2_times_k_plus_1.as_ptr()),
             re_im_odd_plus_im_re_odd,
         ));
 
-        out[2 * (k + n_half) + 1] = result4[0];
-        out[2 * (k + n_half + 1) + 1] = result4[1];
-        out[2 * (k + n_half + 2) + 1] = result4[1];
-        out[2 * (k + n_half + 3) + 1] = result4[1];
+        out[2 * k + 1] = out_2_times_k_plus_1[0];
+        out[2 * (k + 1) + 1] = out_2_times_k_plus_1[1];
+        out[2 * (k + 2) + 1] = out_2_times_k_plus_1[2];
+        out[2 * (k + 3) + 1] = out_2_times_k_plus_1[3];
+
+        // --------------------------------------------------------
+
+        // out[2 * (k + n / 2)] = even_fft[2 * k] - re * re_odd + im * im_odd;
+        let out_2_times_k_plus_n_half = norm(vsubq_f32(
+            vld1q_f32(even_2_times_k.as_ptr()),
+            re_re_odd_plus_im_im_odd,
+        ));
+
+        out[2 * (k + n_half)] = out_2_times_k_plus_n_half[0];
+        out[2 * (k + n_half + 1)] = out_2_times_k_plus_n_half[1];
+        out[2 * (k + n_half + 2)] = out_2_times_k_plus_n_half[2];
+        out[2 * (k + n_half + 3)] = out_2_times_k_plus_n_half[3];
+
+        // out[2 * (k + n / 2) + 1] = even_fft[2 * k + 1] - re * im_odd - im * re_odd;
+        let out_2_times_k_plus_n_half_plus_1 = norm(vsubq_f32(
+            vld1q_f32(even_2_times_k_plus_1.as_ptr()),
+            re_im_odd_minus_im_re_odd,
+        ));
+
+        out[2 * (k + n_half) + 1] = out_2_times_k_plus_n_half_plus_1[0];
+        out[2 * (k + n_half + 1) + 1] = out_2_times_k_plus_n_half_plus_1[1];
+        out[2 * (k + n_half + 2) + 1] = out_2_times_k_plus_n_half_plus_1[2];
+        out[2 * (k + n_half + 3) + 1] = out_2_times_k_plus_n_half_plus_1[3];
     }
 }
 
@@ -189,16 +207,92 @@ unsafe fn norm(values: float32x4_t) -> [f32; 4] {
     output
 }
 
+fn fft2(inp: &[f32]) -> Vec<f32> {
+    let n = inp.len();
+    let zero = 0.0f32;
+
+    // Base cases for recursion.
+    if n == 1 {
+        return vec![inp[0], zero];
+    }
+    if n % 2 == 1 {
+        return dft(inp);
+    }
+
+    let mut out = vec![zero; n * 2];
+    let mut even = Vec::with_capacity(n / 2);
+    let mut odd = Vec::with_capacity(n / 2);
+
+    // Split the input into even and odd components.
+    for (i, &inp) in inp.iter().enumerate() {
+        if i % 2 == 0 {
+            even.push(inp)
+        } else {
+            odd.push(inp);
+        }
+    }
+
+    // Recursive FFT calls for even and odd parts.
+    let even_fft = fft2(&even);
+    let odd_fft = fft2(&odd);
+
+    // Combine the FFT results from the even and odd parts.
+    let two_pi = PI + PI;
+    let n_t = n as f32;
+    for k in 0..n / 2 {
+        let k_t = k as f32;
+        let theta = two_pi * k_t / n_t;
+        let re = theta.cos();
+        let im = -theta.sin();
+
+        let re_odd = odd_fft[2 * k];
+        let im_odd = odd_fft[2 * k + 1];
+
+        out[2 * k] = even_fft[2 * k] + re * re_odd - im * im_odd;
+        out[2 * k + 1] = even_fft[2 * k + 1] + re * im_odd + im * re_odd;
+
+        out[2 * (k + n / 2)] = even_fft[2 * k] - re * re_odd + im * im_odd;
+        out[2 * (k + n / 2) + 1] = even_fft[2 * k + 1] - re * im_odd - im * re_odd;
+    }
+    out
+}
+
+/// 0 -> 2 * k     = 0
+/// 0 -> 2 * k + 1 = 1
+///
+/// 1 -> 2 * k     = 2
+/// 1 -> 2 * k + 1 = 3
+///
+/// 2 -> 2 * k     = 4
+/// 2 -> 2 * k + 1 = 5
+///
+/// 3 -> 2 * k     = 6
+/// 3 -> 2 * k + 1 = 7
+///
+/// 4
+/// 5
+/// 6
+/// 7
+/// 8
+/// 9
+/// 10
+///
+
 #[test]
 fn fft_test() {
-    let m = unsafe {
+    println!("{:?}", unsafe {
         fft(&[
-            1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 2.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 2.0, 1.0,
-            1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 2.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 2.0,
+            1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 2.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 2.0,
         ])
-    };
-
-    // println!("{:?}", m);
+        .iter()
+        .zip(
+            fft2(&[
+                1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 2.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 2.0,
+            ])
+            .iter(),
+        )
+        .collect::<Vec<_>>()
+    });
 }
 #[test]
 fn tester() {
